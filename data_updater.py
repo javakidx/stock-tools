@@ -23,6 +23,44 @@ class DataUpdater:
         """
         self.db = db
 
+    def get_full_symbol(self, symbol: str) -> Optional[str]:
+        """
+        取得完整的股票代碼（自動加上 .TW 或 .TWO 後綴）
+
+        Args:
+            symbol: 股票代碼（可能有或沒有後綴）
+
+        Returns:
+            完整的股票代碼，如果找不到則返回 None
+        """
+        # 如果已經有後綴，直接返回
+        if symbol.endswith(('.TW', '.TWO')):
+            return symbol
+
+        # 先嘗試 .TW（上市）
+        tw_symbol = f"{symbol}.TW"
+        try:
+            ticker = yf.Ticker(tw_symbol)
+            # 嘗試取得一筆資料來驗證股票是否存在
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                return tw_symbol
+        except:
+            pass
+
+        # 再嘗試 .TWO（上櫃）
+        two_symbol = f"{symbol}.TWO"
+        try:
+            ticker = yf.Ticker(two_symbol)
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                return two_symbol
+        except:
+            pass
+
+        # 都找不到，返回 None
+        return None
+
     def fetch_stock_data(self, symbol: str, start_date: datetime, end_date: datetime) -> Optional[pd.DataFrame]:
         """
         從 yfinance 取得股票資料

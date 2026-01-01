@@ -5,21 +5,75 @@
 
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
+import yfinance as yf
 from database import StockDatabase
 
 
 class CorrelationEngine:
     """相關係數計算引擎"""
 
-    def __init__(self, db: StockDatabase):
+    def __init__(self, db: StockDatabase, updater=None):
         """
         初始化計算引擎
 
         Args:
             db: 資料庫實例
+            updater: DataUpdater 實例（可選，用於自動更新資料）
         """
         self.db = db
+        self.updater = updater
+
+    def get_full_symbol(self, symbol: str) -> Optional[str]:
+        """
+        取得完整的股票代碼（自動加上 .TW 或 .TWO 後綴）
+
+        Args:
+            symbol: 股票代碼（可能有或沒有後綴）
+
+        Returns:
+            完整的股票代碼，如果找不到則返回 None
+        """
+        # 如果已經有後綴，先檢查資料庫中是否有資料
+        if symbol.endswith(('.TW', '.TWO')):
+            data = self.db.get_stock_prices(symbol, days=5)
+            if not data.empty:
+                return symbol
+
+        # 移除可能存在的後綴
+        base_symbol = symbol.replace('.TW', '').replace('.TWO', '')
+
+        # 先檢查資料庫中的 .TW（上市）
+        tw_symbol = f"{base_symbol}.TW"
+        data = self.db.get_stock_prices(tw_symbol, days=5)
+        if not data.empty:
+            return tw_symbol
+
+        # 再檢查資料庫中的 .TWO（上櫃）
+        two_symbol = f"{base_symbol}.TWO"
+        data = self.db.get_stock_prices(two_symbol, days=5)
+        if not data.empty:
+            return two_symbol
+
+        # 資料庫中都沒有，嘗試從 yfinance 判斷
+        try:
+            ticker = yf.Ticker(tw_symbol)
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                return tw_symbol
+        except:
+            pass
+
+        try:
+            ticker = yf.Ticker(two_symbol)
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                return two_symbol
+        except:
+            pass
+
+        # 都找不到，返回 None
+        return None
 
     def calculate_correlation(
         self,
@@ -65,101 +119,84 @@ class CorrelationEngine:
         except:
             return np.nan
 
-    def find_correlated_stocks(
+    def calculate_two_stocks_correlation(
         self,
-        target_symbol: str,
-        top_n: int = 20
-    ) -> List[Dict]:
+        symbol1: str,
+        symbol2: str
+    ) -> Dict:
         """
-        找出與目標股票最相關的前 N 檔股票
+        計算兩檔股票之間的相關係數
 
         Args:
-            target_symbol: 目標股票代碼
-            top_n: 返回前 N 檔股票
+            symbol1: 第一檔股票代碼
+            symbol2: 第二檔股票代碼
 
         Returns:
-            排序後的相關股票列表，每個元素包含:
+            包含相關係數的字典:
             {
-                'symbol': 股票代碼,
-                'name': 股票名稱,
+                'symbol1': 股票1代碼,
+                'symbol2': 股票2代碼,
+                'name1': 股票1名稱,
+                'name2': 股票2名稱,
                 'corr_120': 120日相關係數,
-                'corr_20': 20日相關係數,
-                'corr_10': 10日相關係數
+                'corr_60': 60日相關係數,
+                'corr_20': 20日相關係數
             }
         """
-        # 確保目標股票代碼有正確的後綴
-        if not target_symbol.endswith(('.TW', '.TWO')):
-            target_symbol = target_symbol + '.TW'
+        # 自動判斷並加上正確的後綴
+        full_symbol1 = self.get_full_symbol(symbol1)
+        full_symbol2 = self.get_full_symbol(symbol2)
 
-        # 取得目標股票的價格資料
-        target_data = self.db.get_stock_prices(target_symbol, days=120)
+        if not full_symbol1:
+            raise ValueError(f"找不到股票 {symbol1} 的資料（已嘗試 .TW 和 .TWO 後綴）")
+        if not full_symbol2:
+            raise ValueError(f"找不到股票 {symbol2} 的資料（已嘗試 .TW 和 .TWO 後綴）")
 
-        if target_data.empty:
-            raise ValueError(f"找不到股票 {target_symbol} 的資料")
+        # 取得兩檔股票的價格資料
+        data1 = self.db.get_stock_prices(full_symbol1, days=120)
+        data2 = self.db.get_stock_prices(full_symbol2, days=120)
 
-        # 取得所有股票代碼
-        all_symbols = self.db.get_all_symbols()
+        # 如果資料為空且有 updater，嘗試更新資料
+        if data1.empty and self.updater:
+            print(f"正在從 yfinance 抓取 {full_symbol1} 的資料...")
+            if self.updater.update_stock(full_symbol1, days=120):
+                data1 = self.db.get_stock_prices(full_symbol1, days=120)
 
-        # 儲存結果
-        results = []
+        if data2.empty and self.updater:
+            print(f"正在從 yfinance 抓取 {full_symbol2} 的資料...")
+            if self.updater.update_stock(full_symbol2, days=120):
+                data2 = self.db.get_stock_prices(full_symbol2, days=120)
 
-        print(f"\n正在計算與 {target_symbol} 的相關係數...")
-        print(f"共需計算 {len(all_symbols)} 檔股票")
-        print("=" * 60)
+        # 檢查資料是否成功取得
+        if data1.empty:
+            raise ValueError(f"找不到股票 {full_symbol1} 的資料")
+        if data2.empty:
+            raise ValueError(f"找不到股票 {full_symbol2} 的資料")
 
-        # 計算每個股票的相關係數
-        for i, symbol in enumerate(all_symbols, 1):
-            # 跳過目標股票本身
-            if symbol == target_symbol:
-                continue
+        # 計算不同週期的相關係數
+        corr_120 = self.calculate_correlation(data1, data2, 120)
+        corr_60 = self.calculate_correlation(data1, data2, 60)
+        corr_20 = self.calculate_correlation(data1, data2, 20)
 
-            # 顯示進度
-            if i % 50 == 0:
-                print(f"進度: {i}/{len(all_symbols)}")
+        # 取得股票名稱
+        cursor = self.db.conn.cursor()
+        cursor.execute("SELECT name FROM stock_list WHERE symbol = ?", (full_symbol1,))
+        result1 = cursor.fetchone()
+        name1 = result1[0] if result1 else ""
 
-            # 取得股票資料
-            stock_data = self.db.get_stock_prices(symbol, days=120)
+        cursor.execute("SELECT name FROM stock_list WHERE symbol = ?", (full_symbol2,))
+        result2 = cursor.fetchone()
+        name2 = result2[0] if result2 else ""
 
-            if stock_data.empty:
-                continue
-
-            # 計算不同週期的相關係數
-            corr_120 = self.calculate_correlation(target_data, stock_data, 120)
-            corr_20 = self.calculate_correlation(target_data, stock_data, 20)
-            corr_10 = self.calculate_correlation(target_data, stock_data, 10)
-
-            # 如果所有相關係數都是 NaN，跳過這個股票
-            if pd.isna(corr_120) and pd.isna(corr_20) and pd.isna(corr_10):
-                continue
-
-            # 取得股票名稱
-            cursor = self.db.conn.cursor()
-            cursor.execute(
-                "SELECT name FROM stock_list WHERE symbol = ?",
-                (symbol,)
-            )
-            result = cursor.fetchone()
-            name = result[0] if result else ""
-
-            results.append({
-                'symbol': symbol,
-                'name': name,
-                'corr_120': corr_120 if not pd.isna(corr_120) else 0.0,
-                'corr_20': corr_20 if not pd.isna(corr_20) else 0.0,
-                'corr_10': corr_10 if not pd.isna(corr_10) else 0.0
-            })
-
-        print(f"計算完成！共找到 {len(results)} 檔有效股票")
-
-        # 多層排序：120日優先，其次20日，最後10日
-        sorted_results = sorted(
-            results,
-            key=lambda x: (x['corr_120'], x['corr_20'], x['corr_10']),
-            reverse=True
-        )
-
-        # 返回前 N 檔
-        return sorted_results[:top_n]
+        return {
+            'symbol1': full_symbol1,
+            'symbol2': full_symbol2,
+            'name1': name1,
+            'name2': name2,
+            'corr_120': corr_120 if not pd.isna(corr_120) else 0.0,
+            'corr_60': corr_60 if not pd.isna(corr_60) else 0.0,
+            'corr_20': corr_20 if not pd.isna(corr_20) else 0.0
+        }
 
     def format_correlation_strength(self, corr: float) -> str:
         """
